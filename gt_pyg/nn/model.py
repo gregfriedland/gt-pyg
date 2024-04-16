@@ -28,10 +28,12 @@ class GraphTransformerNet(nn.Module):
         edge_dim_in: Optional[int] = None,
         pe_in_dim: Optional[int] = None,
         hidden_dim: int = 128,
+        output_dim: int = 1,
         norm: str = "bn",
         gate=False,
         qkv_bias=False,
         num_gt_layers: int = 4,
+        num_mlp_layers: int = 1,
         num_heads: int = 8,
         gt_aggregators: List[str] = ["sum"],
         aggregators: List[str] = ["sum"],
@@ -89,7 +91,7 @@ class GraphTransformerNet(nn.Module):
                     num_heads=num_heads,
                     act=act,
                     dropout=dropout,
-                    norm="bn",
+                    norm=norm,
                     gate=gate,
                     qkv_bias=qkv_bias,
                     aggregators=gt_aggregators,
@@ -101,18 +103,18 @@ class GraphTransformerNet(nn.Module):
         num_aggrs = len(aggregators)
         self.mu_mlp = MLP(
             input_dim=num_aggrs * hidden_dim,
-            output_dim=1,
+            output_dim=output_dim,
             hidden_dims=hidden_dim,
-            num_hidden_layers=1,
-            dropout=0.0,
+            num_hidden_layers=num_mlp_layers,
+            dropout=dropout,
             act=act,
         )
         self.log_var_mlp = MLP(
             input_dim=num_aggrs * hidden_dim,
-            output_dim=1,
+            output_dim=output_dim,
             hidden_dims=hidden_dim,
-            num_hidden_layers=1,
-            dropout=0.0,
+            num_hidden_layers=num_mlp_layers,
+            dropout=dropout,
             act=act,
         )
 
