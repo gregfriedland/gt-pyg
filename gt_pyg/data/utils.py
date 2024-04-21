@@ -423,7 +423,7 @@ def get_gnn_encodings(mol):
     return inv_kirchhoff_matrix
 
 
-def get_tensor_data(x_smiles: List[str], y: List[float], gnn: bool = True, pe: bool = True, pe_dim: int = 6) -> List[Data]:
+def get_tensor_data(x_smiles: List[str], y: List[float], gnn: bool = True, pe: bool = True, pe_dim: int = 6, verbose: bool = True) -> List[Data]:
     """
     Constructs labeled molecular graphs in the form of torch_geometric.data.Data objects
     using SMILES strings and associated numerical labels.
@@ -434,6 +434,7 @@ def get_tensor_data(x_smiles: List[str], y: List[float], gnn: bool = True, pe: b
         gnn (bool, optional): Use Gaussian Network Model style positional encoding.
         pe (bool, optional): Specifies whether to include graph signal (PE) features. Defaults to True.
         pe_dim (int, optional): The number of dimensions to keep in the graph signal. Defaults to 6.
+        verbose: Whether to print progress information. Defaults to True.
 
     Returns:
         List[Data]: A list of torch_geometric.data.Data objects representing labeled molecular graphs.
@@ -441,7 +442,12 @@ def get_tensor_data(x_smiles: List[str], y: List[float], gnn: bool = True, pe: b
 
     data_list = []
 
-    for (smiles, y_val) in tqdm(zip(x_smiles, y), desc="Processing data"):
+    if verbose:
+        pair_iter = tqdm(zip(x_smiles, y), desc="Processing data")
+    else:
+        pair_iter = zip(x_smiles, y)
+
+    for (smiles, y_val) in pair_iter:
         # convert SMILES to RDKit mol object
         mol = Chem.MolFromSmiles(smiles)
 
