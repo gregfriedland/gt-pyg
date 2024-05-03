@@ -1,10 +1,9 @@
 # Standard
-from typing import Optional, List
+from typing import List, Optional
 
 # Third party
 import torch
-from torch import nn
-from torch import Tensor
+from torch import Tensor, nn
 from torch_geometric.data import Batch
 from torch_geometric.nn.aggr import MultiAggregation
 
@@ -24,8 +23,10 @@ class GraphTransformerNet(nn.Module):
 
     def __init__(
         self,
-        node_dim_in: int,
-        edge_dim_in: Optional[int] = None,
+        node_cont_dim_in: int,
+        node_cat_counts: List[int],
+        edge_cat_counts: List[int] = None,
+        cat_hidden_dim: int = 8,
         pe_in_dim: Optional[int] = None,
         hidden_dim: int = 128,
         output_dim: int = 1,
@@ -70,11 +71,16 @@ class GraphTransformerNet(nn.Module):
 
         super(GraphTransformerNet, self).__init__()
 
-        self.node_emb = nn.Linear(node_dim_in, hidden_dim, bias=False)
-        if edge_dim_in:
-            self.edge_emb = nn.Linear(edge_dim_in, hidden_dim, bias=False)
-        else:
-            self.edge_emb = self.register_parameter("edge_emb", None)
+        self.node_embs = nn.ModuleList(
+            [nn.Embedding(cat_count, cat_hidden_dim) for cat_count in node_cat_counts]
+        )
+        self.node_linear = nn.Linear(
+            cat_hidden_dim * len(node_cat_counts) + node_cont_dim_in, hidden_dim
+        )
+        self.edge_embs = nn.ModuleList(
+            [nn.Embedding(cat_count, cat_hidden_dim) for cat_count in edge_cat_counts]
+        )
+        self.edge_linear = nn.Linear(cat_hidden_dim * len(edge_cat_counts), hidden_dim)
 
         if pe_in_dim:
             self.pe_emb = nn.Linear(pe_in_dim, hidden_dim, bias=False)
@@ -128,18 +134,14 @@ class GraphTransformerNet(nn.Module):
               so the variance estimation differs by a factor of two from the default
               kaiming_uniform initialization.
         """
-        nn.init.xavier_uniform_(self.node_emb.weight)
-        if self.edge_emb is not None:
-            nn.init.xavier_uniform_(self.edge_emb.weight)
-        if self.pe_emb is not None:
-            nn.init.xavier_uniform_(self.pe_emb.weight)
+        for emb in self.node_embs + self.edge_embs:
+            nn.init.xavier_uniform_(emb.weight)
+        nn.init.xavier_uniform_(self.node_linear.weight)
+        nn.init.xavier_uniform_(self.edge_linear.weight)
+        nn.init.xavier_uniform_(self.pe_emb.weight)
 
     def forward(
         self,
-        x: Tensor,
-        edge_index: Tensor,
-        edge_attr: Tensor,
-        pe: Tensor,
         batch: Batch,
         zero_var: bool = False,
     ) -> Tensor:
@@ -158,17 +160,33 @@ class GraphTransformerNet(nn.Module):
         Returns:
             Tensor: The output of the forward pass.
         """
+        # concat node categorical embeddings
+        x_cat = [
+            self.node_embs[i](batch.x_cat[:, i]) for i in range(len(self.node_embs))
+        ]
+        x_cat = torch.cat(x_cat, dim=-1)
+        x = torch.cat([x_cat, batch.x_cont], dim=-1)
+        x = self.node_linear(x)
 
-        x = self.node_emb(x)
+        # concat edge categorical embeddings
+        edge_attr = torch.cat(
+            [
+                self.edge_embs[i](batch.edge_attr[:, i])
+                for i in range(len(self.edge_embs))
+            ],
+            dim=-1,
+        )
+        edge_attr = self.edge_linear(edge_attr)
+
         if self.pe_emb is not None:
-            x = x + self.pe_emb(pe)
-        if self.edge_emb is not None:
-            edge_attr = self.edge_emb(edge_attr)
+            x = x + self.pe_emb(batch.pe)
 
         for gt_layer in self.gt_layers:
-            (x, edge_attr) = gt_layer(x=x, edge_index=edge_index, edge_attr=edge_attr)
+            (x, edge_attr) = gt_layer(
+                x=x, edge_index=batch.edge_index, edge_attr=edge_attr
+            )
 
-        x = self.global_pool(x, batch)
+        x = self.global_pool(x, batch.batch)
         mu = self.mu_mlp(x)
         log_var = self.log_var_mlp(x)
         if zero_var:

@@ -1,47 +1,254 @@
 # Standard
 import logging
-from typing import List
-from typing import Tuple
+from typing import List, Tuple
 
-# Third party
-from tqdm.auto import tqdm
-import pandas as pd
 import numpy as np
-from numpy.linalg import pinv
-from rdkit import Chem
-from rdkit.Chem.rdmolops import GetAdjacencyMatrix
+import pandas as pd
 import torch
+from numpy.linalg import pinv
+from rdkit import Chem, RDLogger, rdBase
+from rdkit.Chem.rdmolops import GetAdjacencyMatrix
 from torch_geometric.data import Data
-from rdkit import RDLogger
-from rdkit import rdBase
 
 
-__SMILES = "c1ccccc1"
+class NodeCategoricalFeatures:
+    ATOM_TYPES = [
+        "C",
+        "N",
+        "O",
+        "S",
+        "F",
+        "Si",
+        "P",
+        "Cl",
+        "Br",
+        "Mg",
+        "Na",
+        "Ca",
+        "Fe",
+        "As",
+        "Al",
+        "I",
+        "B",
+        "V",
+        "K",
+        "Tl",
+        "Yb",
+        "Sb",
+        "Sn",
+        "Ag",
+        "Pd",
+        "Co",
+        "Se",
+        "Ti",
+        "Zn",
+        "Li",
+        "Ge",
+        "Cu",
+        "Au",
+        "Ni",
+        "Cd",
+        "In",
+        "Mn",
+        "Zr",
+        "Cr",
+        "Pt",
+        "Hg",
+        "Pb",
+        "Unknown",
+    ]
+    ATOM_DEGREES = [0, 1, 2, 3, 4, 5]
+    FORMAL_CHARGES = [-3, -2, -1, 0, 1, 2, 3, 4]
+    HYBRIDISATION_TYPES = ["S", "SP", "SP2", "SP2D", "SP3", "SP3D", "SP3D2", "OTHER"]
+    NUM_HYDROGENS = [0, 1, 2, 3, 4]
+    IS_IN_RING = [0, 1]
+    IS_AROMATIC = [0, 1]
+
+    def __init__(self, atom: Chem.Atom):
+        self.atom = atom
+
+    def __call__(self):
+        atom_type_enc = get_categorical_id(str(self.atom.GetSymbol()), self.ATOM_TYPES)
+
+        n_heavy_neighbors_enc = get_categorical_id(
+            int(self.atom.GetDegree()), self.ATOM_DEGREES
+        )
+
+        formal_charge_enc = get_categorical_id(
+            int(self.atom.GetFormalCharge()), self.FORMAL_CHARGES
+        )
+
+        hybridisation_type_enc = get_categorical_id(
+            str(self.atom.GetHybridization()), self.HYBRIDISATION_TYPES
+        )
+
+        n_hydrogen_enc = get_categorical_id(
+            int(self.atom.GetTotalNumHs()), self.NUM_HYDROGENS
+        )
+
+        is_in_a_ring_enc = int(self.atom.IsInRing())
+
+        is_aromatic_enc = int(self.atom.GetIsAromatic())
+
+        return [
+            atom_type_enc,
+            n_heavy_neighbors_enc,
+            formal_charge_enc,
+            hybridisation_type_enc,
+            n_hydrogen_enc,
+            is_in_a_ring_enc,
+            is_aromatic_enc,
+        ]
+
+    @classmethod
+    def get_counts(self) -> List[int]:
+        return [
+            len(self.ATOM_TYPES),
+            len(self.ATOM_DEGREES),
+            len(self.FORMAL_CHARGES),
+            len(self.HYBRIDISATION_TYPES),
+            len(self.NUM_HYDROGENS),
+            len(self.IS_IN_RING),
+            len(self.IS_AROMATIC),
+        ]
+
+    @classmethod
+    def num_features(self) -> int:
+        return len(self.get_counts())
 
 
-def get_node_dim() -> int:
-    """
-    Retrieves the dimensionality of the node feature vector.
+class NodeContinuousFeatures:
+    MIN_ATOM = Chem.rdchem.Atom("H")
+    MAX_ATOM = Chem.rdchem.Atom("Pb")
 
-    Returns:
-        int: The dimensionality of the node feature vector.
-    """
-    data = get_tensor_data([__SMILES], [0], pe=False)[0]
-    return data.x.size(-1)
+    def __init__(self, atom: Chem.Atom):
+        self.atom = atom
+
+    def __call__(self) -> list[float]:
+        atomic_mass = (
+            float(self.atom.GetMass())
+            if str(self.atom.GetSymbol()) != "Unknown"
+            else self.MAX_ATOM.GetMass()
+        )
+        atomic_mass_scaled = (atomic_mass - self.MIN_ATOM.GetMass()) / (
+            self.MAX_ATOM.GetMass() - self.MIN_ATOM.GetMass()
+        )
+
+        vdw_radius = (
+            Chem.GetPeriodicTable().GetRvdw(self.atom.GetAtomicNum())
+            if str(self.atom.GetSymbol()) != "Unknown"
+            else self.MAX_ATOM.GetAtomicNum()
+        )
+        vdw_radius_scaled = (vdw_radius - self.MIN_ATOM.GetAtomicNum()) / (
+            self.MAX_ATOM.GetAtomicNum() - self.MIN_ATOM.GetAtomicNum()
+        )
+
+        covalent_radius = (
+            Chem.GetPeriodicTable().GetRcovalent(self.atom.GetAtomicNum())
+            if str(self.atom.GetSymbol()) != "Unknown"
+            else self.MAX_ATOM.GetAtomicNum()
+        )
+        covalent_radius_scaled = (covalent_radius - self.MIN_ATOM.GetAtomicNum()) / (
+            self.MAX_ATOM.GetAtomicNum() - self.MIN_ATOM.GetAtomicNum()
+        )
+
+        return [
+            atomic_mass_scaled,
+            vdw_radius_scaled,
+            covalent_radius_scaled,
+        ]
+
+    @classmethod
+    def num_features(self) -> int:
+        return 3
 
 
-def get_edge_dim() -> int:
-    """
-    Retrieves the dimensionality of the edge feature vector.
+class EdgeCategoricalFeatures:
+    BOND_TYPES = [
+        "SINGLE",
+        "DOUBLE",
+        "TRIPLE",
+        "AROMATIC",
+    ]
+    STEREO_TYPES = [
+        "STEREOZ",
+        "STEREOE",
+        "STEREOANY",
+        "STEREONONE",
+    ]
+    RING_TYPES = [
+        "NONE",
+        "SIZE_5",
+        "SIZE_6",
+        "OTHER",
+    ]
 
-    Returns:
-        int: The dimensionality of the edge feature vector.
-    """
-    data = get_tensor_data([__SMILES], [0], pe=False)[0]
-    return data.edge_attr.size(-1)
+    def __init__(self, bond: Chem.Bond):
+        self.bond = bond
+
+    def __call__(self) -> list[int]:
+        bond_type_enc = get_categorical_id(
+            str(self.bond.GetBondType()), self.BOND_TYPES
+        )
+
+        bond_ring_type = "NONE"
+        if self.bond.IsInRing():
+            if self.bond.IsInRingSize(5):
+                bond_ring_type = "SIZE_5"
+            elif self.bond.IsInRingSize(6):
+                bond_ring_type = "SIZE_6"
+            else:
+                bond_ring_type = "OTHER"
+        bond_ring_size_enc = get_categorical_id(bond_ring_type, self.RING_TYPES)
+
+        bond_is_conj_enc = int(self.bond.GetIsConjugated())
+
+        stereo_type_enc = get_categorical_id(
+            str(self.bond.GetStereo()), self.STEREO_TYPES
+        )
+
+        return [
+            bond_type_enc,
+            bond_ring_size_enc,
+            bond_is_conj_enc,
+            stereo_type_enc,
+        ]
+
+    @classmethod
+    def num_features(self) -> int:
+        return len(self.get_counts())
+
+    @classmethod
+    def get_counts(self) -> List[int]:
+        return [
+            len(self.BOND_TYPES),
+            len(self.RING_TYPES),
+            2,
+            len(self.STEREO_TYPES),
+        ]
 
 
-def clean_df(tdc_df: pd.DataFrame, min_num_atoms: int = 0, use_largest_fragment=True, x_label='Drug', y_label='Y') -> pd.DataFrame:
+class PositionalEncoding:
+    def __init__(self, mol: Chem.Mol, pe_dim: int = 6):
+        self.mol = mol
+        self.pe_dim = pe_dim
+
+    def __call__(self):
+        pe = get_pe(self.mol, pe_dim=self.pe_dim)
+        return pe
+
+    @classmethod
+    def num_features(self) -> int:
+        return 6
+
+
+def clean_df(
+    tdc_df: pd.DataFrame,
+    min_num_atoms: int = 0,
+    use_largest_fragment=True,
+    x_label="Drug",
+    y_label="Y",
+) -> pd.DataFrame:
     """
     Cleans a DataFrame containing chemical structures by removing rows that do not meet certain criteria.
 
@@ -107,18 +314,24 @@ def clean_df(tdc_df: pd.DataFrame, min_num_atoms: int = 0, use_largest_fragment=
     else:
         tdc_df = tdc_df.query("num_frags == 1").copy()
         fragments_removed = initial_length - len(tdc_df)
-        logging.info(f"Removed {fragments_removed} compounds that have more than 1 fragment.")
+        logging.info(
+            f"Removed {fragments_removed} compounds that have more than 1 fragment."
+        )
 
     if min_num_atoms > 0:
         tdc_df = tdc_df.query(f"num_atoms >= {min_num_atoms}").copy()
         removed_cmpds = initial_length - len(tdc_df) + fragments_removed
-        logging.info(f"Removed {removed_cmpds} compounds that did not meet the size criteria.")
+        logging.info(
+            f"Removed {removed_cmpds} compounds that did not meet the size criteria."
+        )
 
     tdc_df = tdc_df[[x_label, y_label]]
     return tdc_df
 
 
-def get_train_valid_test_data(endpoint: str, min_num_atoms: int = 0, use_largest_fragment: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def get_train_valid_test_data(
+    endpoint: str, min_num_atoms: int = 0, use_largest_fragment: bool = True
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Retrieves and cleans the train, validation, and test data for a specific endpoint in the ADME dataset.
 
@@ -141,9 +354,21 @@ def get_train_valid_test_data(endpoint: str, min_num_atoms: int = 0, use_largest
     data = ADME(name=endpoint)
     splits = data.get_split()
 
-    train_data = clean_df(splits["train"], min_num_atoms=min_num_atoms, use_largest_fragment=use_largest_fragment)
-    valid_data = clean_df(splits["valid"], min_num_atoms=min_num_atoms, use_largest_fragment=use_largest_fragment)
-    test_data = clean_df(splits["test"], min_num_atoms=min_num_atoms, use_largest_fragment=use_largest_fragment)
+    train_data = clean_df(
+        splits["train"],
+        min_num_atoms=min_num_atoms,
+        use_largest_fragment=use_largest_fragment,
+    )
+    valid_data = clean_df(
+        splits["valid"],
+        min_num_atoms=min_num_atoms,
+        use_largest_fragment=use_largest_fragment,
+    )
+    test_data = clean_df(
+        splits["test"],
+        min_num_atoms=min_num_atoms,
+        use_largest_fragment=use_largest_fragment,
+    )
 
     return (train_data, valid_data, test_data)
 
@@ -154,7 +379,7 @@ def get_molecule_ace_datasets(
     valid_fraction: float = 0.0,
     seed: int = 42,
     min_num_atoms: int = 0,
-    use_largest_fragment: bool = True
+    use_largest_fragment: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Retrieve molecule ACE datasets.
@@ -173,12 +398,12 @@ def get_molecule_ace_datasets(
     try:
         from MoleculeACE import Data
     except ImportError:
-        logging.info('Importing MoleculeACE failed')
+        logging.info("Importing MoleculeACE failed")
         raise
 
     data = Data(dataset)
-    df_train_tmp = pd.DataFrame({'SMILES': data.smiles_train, 'Y': data.y_train})
-    df_test = pd.DataFrame({'SMILES': data.smiles_test, 'Y': data.y_test})
+    df_train_tmp = pd.DataFrame({"SMILES": data.smiles_train, "Y": data.y_train})
+    df_test = pd.DataFrame({"SMILES": data.smiles_test, "Y": data.y_test})
 
     shuffled_df = df_train_tmp.sample(frac=1, random_state=seed)
 
@@ -190,14 +415,36 @@ def get_molecule_ace_datasets(
     df_train = shuffled_df.iloc[:split_index]
     df_valid = shuffled_df.iloc[split_index:]
 
-    train_data = clean_df(df_train, min_num_atoms=min_num_atoms, use_largest_fragment=use_largest_fragment, x_label="SMILES")
-    valid_data = clean_df(df_valid, min_num_atoms=min_num_atoms, use_largest_fragment=use_largest_fragment, x_label="SMILES")
-    test_data = clean_df(df_test, min_num_atoms=min_num_atoms, use_largest_fragment=use_largest_fragment, x_label="SMILES")
+    train_data = clean_df(
+        df_train,
+        min_num_atoms=min_num_atoms,
+        use_largest_fragment=use_largest_fragment,
+        x_label="SMILES",
+    )
+    valid_data = clean_df(
+        df_valid,
+        min_num_atoms=min_num_atoms,
+        use_largest_fragment=use_largest_fragment,
+        x_label="SMILES",
+    )
+    test_data = clean_df(
+        df_test,
+        min_num_atoms=min_num_atoms,
+        use_largest_fragment=use_largest_fragment,
+        x_label="SMILES",
+    )
 
     return (train_data, valid_data, test_data)
 
 
-def get_data_from_csv(filename: str, x_label: str, y_label: str, sep: str = ',', min_num_atoms: int = 0, use_largest_fragment: bool = True) -> pd.DataFrame:
+def get_data_from_csv(
+    filename: str,
+    x_label: str,
+    y_label: str,
+    sep: str = ",",
+    min_num_atoms: int = 0,
+    use_largest_fragment: bool = True,
+) -> pd.DataFrame:
     """
     Reads data from a CSV file and returns a cleaned DataFrame containing specified columns.
 
@@ -220,15 +467,17 @@ def get_data_from_csv(filename: str, x_label: str, y_label: str, sep: str = ',',
     df = pd.read_csv(filename, sep=sep)
     df = df[[x_label, y_label]]
 
-    data = clean_df(df,
-                    min_num_atoms=min_num_atoms,
-                    use_largest_fragment=use_largest_fragment,
-                    x_label=x_label,
-                    y_label=y_label)
+    data = clean_df(
+        df,
+        min_num_atoms=min_num_atoms,
+        use_largest_fragment=use_largest_fragment,
+        x_label=x_label,
+        y_label=y_label,
+    )
     return data
 
 
-def one_hot_encoding(x: str, permitted_list: List[str]) -> List[int]:
+def get_categorical_id(x: str, permitted_list: List[str]) -> int:
     """
     Maps input elements x which are not in the permitted list to the last element
     of the permitted list.
@@ -243,12 +492,7 @@ def one_hot_encoding(x: str, permitted_list: List[str]) -> List[int]:
     if x not in permitted_list:
         x = permitted_list[-1]
 
-    binary_encoding = [
-        int(boolean_value)
-        for boolean_value in list(map(lambda s: x == s, permitted_list))
-    ]
-
-    return binary_encoding
+    return permitted_list.index(x)
 
 
 def get_pe(mol: Chem.Mol, pe_dim: int = 6, normalized: bool = True) -> np.ndarray:
@@ -279,12 +523,12 @@ def get_pe(mol: Chem.Mol, pe_dim: int = 6, normalized: bool = True) -> np.ndarra
     N = vec.shape[1]
     M = pe_dim + 1
     if N < M:
-        vec = np.pad(vec, ((0, 0), (0, M - N)), mode='constant')
+        vec = np.pad(vec, ((0, 0), (0, M - N)), mode="constant")
 
     return vec[:, 1:M]
 
 
-def get_atom_features(atom: Chem.Atom, use_chirality: bool = True, hydrogens_implicit: bool = True) -> np.ndarray:
+def get_atom_features(atom: Chem.Atom) -> tuple[list[int], list[float]]:
     """
     Computes a 1D numpy array of atom features from an RDKit atom object.
 
@@ -294,81 +538,16 @@ def get_atom_features(atom: Chem.Atom, use_chirality: bool = True, hydrogens_imp
         hydrogens_implicit (bool, optional): Specifies whether to include implicit hydrogen count. Defaults to True.
 
     Returns:
-        np.ndarray: A 1D numpy array representing the atom features.
+        np.ndarray, np.ndarray: categorical and continuous atom features.
     """
-    permitted_list_of_atoms = [
-        "C", "N", "O", "S", "F", "Si", "P", "Cl", "Br", "Mg", "Na", "Ca", "Fe",
-        "As", "Al", "I", "B", "V", "K", "Tl", "Yb", "Sb", "Sn", "Ag", "Pd",
-        "Co", "Se", "Ti", "Zn", "Li", "Ge", "Cu", "Au", "Ni", "Cd", "In", "Mn",
-        "Zr", "Cr", "Pt", "Hg", "Pb", "Unknown"
-    ]
 
-    if not hydrogens_implicit:
-        permitted_list_of_atoms = ["H"] + permitted_list_of_atoms
+    categorical_feats = NodeCategoricalFeatures(atom)()
+    continuous_feats = NodeContinuousFeatures(atom)()
 
-    atom_type_enc = one_hot_encoding(str(atom.GetSymbol()), permitted_list_of_atoms)
-
-    n_heavy_neighbors_enc = one_hot_encoding(
-        int(atom.GetDegree()), [0, 1, 2, 3, 4, "MoreThanFour"]
-    )
-
-    formal_charge_enc = one_hot_encoding(
-        int(atom.GetFormalCharge()), [-3, -2, -1, 0, 1, 2, 3, "Extreme"]
-    )
-
-    hybridisation_type_enc = one_hot_encoding(
-        str(atom.GetHybridization()),
-        ["S", "SP", "SP2", "SP3", "SP3D", "SP3D2", "OTHER"],
-    )
-
-    is_in_a_ring_enc = [int(atom.IsInRing())]
-
-    is_aromatic_enc = [int(atom.GetIsAromatic())]
-
-#    atomic_mass_scaled = [float((atom.GetMass() - 10.812) / 116.092)]
-#
-#    vdw_radius_scaled = [
-#        float((Chem.GetPeriodicTable().GetRvdw(atom.GetAtomicNum()) - 1.5) / 0.6)
-#    ]
-#
-#    covalent_radius_scaled = [
-#        float((Chem.GetPeriodicTable().GetRcovalent(atom.GetAtomicNum()) - 0.64) / 0.76)
-#    ]
-
-    atom_feature_vector = (
-        atom_type_enc
-        + n_heavy_neighbors_enc
-        + formal_charge_enc
-        + hybridisation_type_enc
-        + is_in_a_ring_enc
-        + is_aromatic_enc
-#        + atomic_mass_scaled
-#        + vdw_radius_scaled
-#        + covalent_radius_scaled
-    )
-
-    if use_chirality:
-        chirality_type_enc = one_hot_encoding(
-            str(atom.GetChiralTag()),
-            [
-                "CHI_UNSPECIFIED",
-                "CHI_TETRAHEDRAL_CW",
-                "CHI_TETRAHEDRAL_CCW",
-                "CHI_OTHER",
-            ],
-        )
-        atom_feature_vector += chirality_type_enc
-
-    if hydrogens_implicit:
-        n_hydrogens_enc = one_hot_encoding(
-            int(atom.GetTotalNumHs()), [0, 1, 2, 3, 4, "MoreThanFour"]
-        )
-        atom_feature_vector += n_hydrogens_enc
-
-    return np.array(atom_feature_vector)
+    return categorical_feats, continuous_feats
 
 
-def get_bond_features(bond: Chem.Bond, use_stereochemistry: bool = True) -> np.ndarray:
+def get_bond_features(bond: Chem.Bond) -> list[int]:
     """
     Takes an RDKit bond object as input and gives a 1D numpy array of bond features as output.
 
@@ -378,30 +557,10 @@ def get_bond_features(bond: Chem.Bond, use_stereochemistry: bool = True) -> np.n
             Defaults to True.
 
     Returns:
-        np.ndarray: A 1D numpy array of bond features.
+        np.ndarray: A 1D numpy array of bond features (all categorical)
     """
-    permitted_list_of_bond_types = [
-        Chem.rdchem.BondType.SINGLE,
-        Chem.rdchem.BondType.DOUBLE,
-        Chem.rdchem.BondType.TRIPLE,
-        Chem.rdchem.BondType.AROMATIC,
-    ]
 
-    bond_type_enc = one_hot_encoding(bond.GetBondType(), permitted_list_of_bond_types)
-
-    bond_is_conj_enc = [int(bond.GetIsConjugated())]
-
-    bond_is_in_ring_enc = [int(bond.IsInRing())]
-
-    bond_feature_vector = bond_type_enc + bond_is_conj_enc + bond_is_in_ring_enc
-
-    if use_stereochemistry:
-        stereo_type_enc = one_hot_encoding(
-            str(bond.GetStereo()), ["STEREOZ", "STEREOE", "STEREOANY", "STEREONONE"]
-        )
-        bond_feature_vector += stereo_type_enc
-
-    return np.array(bond_feature_vector)
+    return EdgeCategoricalFeatures(bond)()
 
 
 def get_gnn_encodings(mol):
@@ -423,82 +582,86 @@ def get_gnn_encodings(mol):
     return inv_kirchhoff_matrix
 
 
-def get_tensor_data(x_smiles: List[str], y: List[float], gnn: bool = True, pe: bool = True, pe_dim: int = 6, verbose: bool = True) -> List[Data]:
+def get_tensor_data_for_mol(
+    smiles: str,
+    y: List[float],
+    gnn: bool = True,
+    pe: bool = True,
+    pe_dim: int = 6,
+) -> Data:
     """
-    Constructs labeled molecular graphs in the form of torch_geometric.data.Data objects
-    using SMILES strings and associated numerical labels.
+    Constructs a labeled molecular graph in the form of a torch_geometric.data.Data
+    object using SMILES and associated numerical labels.
 
     Args:
-        x_smiles (List[str]): A list of SMILES strings.
-        y (List[float]): A list of numerical labels for the SMILES strings (e.g., associated pKi values).
+        x_smiles (str): a SMILES string.
+        y (List[float]): A list of numerical labels for the SMILES string (e.g., associated pKi values).
         gnn (bool, optional): Use Gaussian Network Model style positional encoding.
         pe (bool, optional): Specifies whether to include graph signal (PE) features. Defaults to True.
         pe_dim (int, optional): The number of dimensions to keep in the graph signal. Defaults to 6.
-        verbose: Whether to print progress information. Defaults to True.
 
     Returns:
-        List[Data]: A list of torch_geometric.data.Data objects representing labeled molecular graphs.
+        Data: a torch_geometric.data.Data objects representing a labeled molecular graph
+            x_cat: Categorical atom features dims (n_atoms, 7)
+            x_cont: Continuous atom features dims (n_atoms, 4)
+            edge_attr: Edge features dims (n_edges, 6)
+            edge_index: Edge index dims (2, n_edges)
+            pe: Positional encoding dims (n_atoms, pe_dim)
+            y: Label tensor
     """
 
-    data_list = []
+    # convert SMILES to RDKit mol object
+    mol = Chem.MolFromSmiles(smiles)
 
-    if verbose:
-        pair_iter = tqdm(zip(x_smiles, y), desc="Processing data")
+    if gnn:
+        dRdR = get_gnn_encodings(mol)
     else:
-        pair_iter = zip(x_smiles, y)
+        dRdR = None
 
-    for (smiles, y_val) in pair_iter:
-        # convert SMILES to RDKit mol object
-        mol = Chem.MolFromSmiles(smiles)
+    # get feature dimensions
+    x_continuous_all = []
+    x_categorical_all = []
+    for atom in mol.GetAtoms():
+        idx = atom.GetIdx()
+        x_categorical, x_continuous = get_atom_features(atom)
 
-        if gnn:
-            dRdR = get_gnn_encodings(mol)
+        if dRdR is not None:
+            x_continuous_all.append(x_continuous + [dRdR[idx][idx]])
         else:
-            dRdR = None
+            x_continuous_all.append(x_continuous)
+        x_categorical_all.append(x_categorical)
 
-        # get feature dimensions
-        x = []
-        for atom in mol.GetAtoms():
-            idx = atom.GetIdx()
-            atom_features = get_atom_features(atom)
+    x_categorical_all = torch.tensor(np.array(x_categorical_all), dtype=torch.long)
+    x_continuous_all = torch.tensor(np.array(x_continuous_all), dtype=torch.float)
 
-            if dRdR is not None:
-                x.append(atom_features + [dRdR[idx][idx]])
-            else:
-                x.append(atom_features)
+    # construct edge index array edge_index of shape (2, n_edges)
+    (rows, cols) = np.nonzero(GetAdjacencyMatrix(mol))
+    torch_rows = torch.from_numpy(rows.astype(np.int64)).to(torch.long)
+    torch_cols = torch.from_numpy(cols.astype(np.int64)).to(torch.long)
+    edge_index = torch.stack([torch_rows, torch_cols], dim=0)
 
-        x = torch.tensor(np.array(x), dtype=torch.float)
+    edge_attr = []
+    if pe:
+        pe_numpy = get_pe(mol, pe_dim=pe_dim)
+        pe_tensor = torch.tensor(pe_numpy, dtype=torch.float)
+    else:
+        pe_tensor = None
 
-        # construct edge index array edge_index of shape (2, n_edges)
-        (rows, cols) = np.nonzero(GetAdjacencyMatrix(mol))
-        torch_rows = torch.from_numpy(rows.astype(np.int64)).to(torch.long)
-        torch_cols = torch.from_numpy(cols.astype(np.int64)).to(torch.long)
-        edge_index = torch.stack([torch_rows, torch_cols], dim=0)
+    for k, (i, j) in enumerate(zip(rows, cols)):
+        edge_attr.append(get_bond_features(mol.GetBondBetweenAtoms(int(i), int(j))))
 
-        edge_attr = []
-        if pe:
-            pe_numpy = get_pe(mol, pe_dim=pe_dim)
-            pe_tensor = torch.tensor(pe_numpy, dtype=torch.float)
-        else:
-            pe_tensor = None
+    edge_attr = torch.tensor(np.array(edge_attr), dtype=torch.int32)
 
-        for k, (i, j) in enumerate(zip(rows, cols)):
-            edge_attr.append(get_bond_features(mol.GetBondBetweenAtoms(int(i), int(j))))
+    # construct label tensor
+    y_tensor = torch.tensor(np.array(y), dtype=torch.float32)
 
-        edge_attr = torch.tensor(np.array(edge_attr), dtype=torch.float)
-
-        # construct label tensor
-        y_tensor = torch.tensor(np.array([y_val]), dtype=torch.float)
-
-        # construct Pytorch Geometric data object and append to data list
-        data_list.append(
-            Data(
-                x=x,
-                edge_index=edge_index,
-                edge_attr=edge_attr,
-                pe=pe_tensor,
-                y=y_tensor,
-            )
-        )
-
-    return data_list
+    # construct Pytorch Geometric data object and append to data list
+    return Data(
+        x_cat=x_categorical_all,
+        x_cont=x_continuous_all,
+        edge_index=edge_index,
+        edge_attr=edge_attr,
+        pe=pe_tensor,
+        y=y_tensor,
+        num_nodes=x_categorical_all.size(0),
+    )
