@@ -40,6 +40,8 @@ class GraphTransformerNet(nn.Module):
         aggregators: List[str] = ["sum"],
         act: str = "relu",
         dropout: float = 0.0,
+        bb_counts: Optional[list[int]] = None,
+        bb_hidden_dim: Optional[int] = 8,
     ):
         """
         Args:
@@ -70,6 +72,13 @@ class GraphTransformerNet(nn.Module):
         """
 
         super(GraphTransformerNet, self).__init__()
+
+        if bb_counts:
+            self.bb_embs = nn.ModuleList(
+                [nn.Embedding(bb_count, bb_hidden_dim) for bb_count in bb_counts]
+            )
+        else:
+            self.bb_embs = self.register_parameter("bb_embs", None)
 
         self.node_embs = nn.ModuleList(
             [nn.Embedding(cat_count, cat_hidden_dim) for cat_count in node_cat_counts]
@@ -107,8 +116,11 @@ class GraphTransformerNet(nn.Module):
         self.global_pool = MultiAggregation(aggregators, mode="cat")
 
         num_aggrs = len(aggregators)
+        mlp_input_dim = num_aggrs * hidden_dim
+        if bb_counts:
+            mlp_input_dim += sum([bb_hidden_dim for _ in bb_counts])
         self.mu_mlp = MLP(
-            input_dim=num_aggrs * hidden_dim,
+            input_dim=mlp_input_dim,
             output_dim=output_dim,
             hidden_dims=hidden_dim,
             num_hidden_layers=num_mlp_layers,
@@ -116,7 +128,7 @@ class GraphTransformerNet(nn.Module):
             act=act,
         )
         self.log_var_mlp = MLP(
-            input_dim=num_aggrs * hidden_dim,
+            input_dim=mlp_input_dim,
             output_dim=output_dim,
             hidden_dims=hidden_dim,
             num_hidden_layers=num_mlp_layers,
@@ -187,6 +199,17 @@ class GraphTransformerNet(nn.Module):
             )
 
         x = self.global_pool(x, batch.batch)
+
+        if self.bb_embs is not None:
+            bb_ids = batch.bb_ids.view(-1, len(self.bb_embs))  # (B, num_bb)
+            bb_emb = torch.cat(
+                [bb_emb(bb_ids[:, i]) for i, bb_emb in enumerate(self.bb_embs)],
+                dim=1,
+            )  # (B, num_bb * bb_hidden_dim)
+            x = torch.cat(
+                [x, bb_emb], dim=-1
+            )  # (B, hidden_dim + num_bb * bb_hidden_dim)
+
         mu = self.mu_mlp(x)
         log_var = self.log_var_mlp(x)
         if zero_var:
